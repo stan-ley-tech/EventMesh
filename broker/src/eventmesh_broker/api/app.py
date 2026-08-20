@@ -124,6 +124,11 @@ def create_app(service: EventMeshService) -> FastAPI:
     def poll(name: str, req: schemas.PollRequest):
         return [serialize.delivered(d) for d in service.poll(name, req.worker_id, max_events=req.max_events)]
 
+    @app.post("/v1/deliveries/{delivery_id}/heartbeat")
+    def heartbeat_delivery(delivery_id: str, req: schemas.AckRequest):
+        service.heartbeat_delivery(delivery_id, req.worker_id)
+        return {"status": "extended"}
+
     @app.post("/v1/deliveries/{delivery_id}/ack")
     def ack(delivery_id: str, req: schemas.AckRequest):
         service.ack(delivery_id, req.worker_id)

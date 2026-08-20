@@ -347,6 +347,17 @@ class EventMeshService:
     def _matches_filter(event: Event, filter_headers: dict) -> bool:
         return all(event.headers.get(k) == v for k, v in filter_headers.items())
 
+    def heartbeat_delivery(self, delivery_id: str, worker_id: str) -> None:
+        with self.db.atomic() as conn:
+            delivery = deliveries_store.get_delivery(conn, delivery_id)
+            if delivery is None:
+                raise DeliveryNotFound(delivery_id)
+            if delivery.status != DeliveryStatus.DELIVERED or delivery.worker_id != worker_id:
+                raise LeaseMismatch(delivery_id)
+            group = groups_store.get_group(conn, delivery.group)
+            new_expiry = self._add_seconds(timeutil.now(), group.delivery_lease_seconds)
+            deliveries_store.renew_lease(conn, delivery_id, new_expiry)
+
     def ack(self, delivery_id: str, worker_id: str) -> None:
         with self.db.atomic() as conn:
             delivery = deliveries_store.get_delivery(conn, delivery_id)

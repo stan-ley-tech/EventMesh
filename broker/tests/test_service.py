@@ -203,6 +203,49 @@ def test_ack_with_wrong_worker_raises_lease_mismatch(service):
         service.ack(d1.delivery_id, "worker-2")
 
 
+def test_delivery_heartbeat_prevents_lease_reclaim(service):
+    service.create_topic("orders", partition_count=1)
+    service.register_schema("orders", 1, ORDER_SCHEMA_V1)
+    service.create_group("processors", topic="orders", delivery_lease_seconds=1)
+    service.publish("orders", {"order_id": "o1", "amount": 1.0}, schema_version=1)
+
+    d1 = service.poll("processors", "worker-1", max_events=1)[0]
+
+    # heartbeat keeps extending the lease past its original 1s window
+    for _ in range(3):
+        time.sleep(0.6)
+        service.heartbeat_delivery(d1.delivery_id, "worker-1")
+
+    service.reclaim_expired_deliveries()
+    service.ack(d1.delivery_id, "worker-1")  # still the same, un-reclaimed delivery
+
+    dlq = service.list_dead_letters("processors")
+    assert dlq == []
+
+
+def test_expired_delivery_without_heartbeat_gets_reclaimed(service):
+    service.create_topic("orders", partition_count=1)
+    service.register_schema("orders", 1, ORDER_SCHEMA_V1)
+    service.create_group(
+        "processors", topic="orders", delivery_lease_seconds=1,
+        retry_policy=RetryPolicy(max_attempts=2, backoff_base_ms=1, backoff_multiplier=1, backoff_max_ms=5, jitter_fraction=0),
+    )
+    service.publish("orders", {"order_id": "o1", "amount": 1.0}, schema_version=1)
+
+    d1 = service.poll("processors", "worker-1", max_events=1)[0]
+    time.sleep(1.2)
+    service.reclaim_expired_deliveries()
+
+    # worker-1's partition-ownership lease is untouched (default 30s) even
+    # though its delivery lease lapsed, so it's still the one that gets the
+    # redelivery - this is the "handler stalled on one event" case, distinct
+    # from a full worker crash which is covered by the reassignment test.
+    time.sleep(0.05)
+    redelivered = service.poll("processors", "worker-1", max_events=1)[0]
+    assert redelivered.attempt == 2
+    assert redelivered.event.id == d1.event.id
+
+
 def test_filter_skips_non_matching_events(service):
     service.create_topic("orders", partition_count=1)
     service.register_schema("orders", 1, ORDER_SCHEMA_V1)
