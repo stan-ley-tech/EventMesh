@@ -477,6 +477,13 @@ class EventMeshService:
                 if first is not None:
                     history_store.append(conn, first.id, EVENT_REPLAYED, {"group": group_name, "partition": p, "from_offset": new_committed + 1})
 
+    def get_event(self, event_id: str) -> Event:
+        with self.db.read() as conn:
+            event = events_store.get_event(conn, event_id)
+        if event is None:
+            raise EventNotFound(event_id)
+        return event
+
     def get_history(self, event_id: str) -> list[HistoryEntry]:
         with self.db.read() as conn:
             if events_store.get_event(conn, event_id) is None:
