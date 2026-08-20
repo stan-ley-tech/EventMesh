@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "eventmesh-broker"
+version = "0.1.0"
+description = "EventMesh broker: durable event bus server"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "jsonschema>=4.21",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "httpx>=0.27"]
+
+[project.scripts]
+eventmesh-broker = "eventmesh_broker.main:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/eventmesh_broker"]

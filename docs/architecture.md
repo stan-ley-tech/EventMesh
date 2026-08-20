@@ -126,12 +126,12 @@ version before accepting it.
 Registering a new version is only accepted if it's backward compatible
 with the immediately preceding one: it may add new properties (required
 or optional), but it may not remove a property that was required
-before, and it may not change the type of a property that exists in
-both versions. This is deliberately one specific, checkable rule rather
-than a general compatibility framework - it's exactly the rule that
-lets an old consumer's assumptions about a topic keep holding after a
-new version starts being published alongside events written against
-the old one.
+before, may not demote a previously-required property to optional, and
+may not change the type of a property that exists in both versions.
+This is deliberately one specific, checkable rule rather than a general
+compatibility framework - it's exactly the rule that lets an old
+consumer's assumptions about a topic keep holding after a new version
+starts being published alongside events written against the old one.
 
 ## Filtering
 
