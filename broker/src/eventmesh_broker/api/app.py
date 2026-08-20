@@ -48,7 +48,10 @@ def create_app(service: EventMeshService) -> FastAPI:
 
     @app.exception_handler(errors.EventMeshError)
     def handle_eventmesh_error(request: Request, exc: errors.EventMeshError):
-        return JSONResponse(status_code=_status_for(exc), content={"error": str(exc)})
+        return JSONResponse(
+            status_code=_status_for(exc),
+            content={"error": str(exc), "type": type(exc).__name__},
+        )
 
     @app.get("/healthz")
     def healthz():
