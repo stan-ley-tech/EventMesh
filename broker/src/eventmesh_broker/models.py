@@ -121,6 +121,7 @@ class Delivery:
     event_offset: int
     worker_id: str
     attempt: int
+    epoch: int
     status: DeliveryStatus
     lease_expires_at: datetime
     delivered_at: datetime

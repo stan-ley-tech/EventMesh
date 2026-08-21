@@ -152,3 +152,20 @@ def set_backoff(conn: sqlite3.Connection, group: str, partition: int, not_before
 
 def clear_backoff(conn: sqlite3.Connection, group: str, partition: int) -> None:
     conn.execute("DELETE FROM retry_backoff WHERE group_name = ? AND partition = ?", (group, partition))
+
+
+def get_epoch(conn: sqlite3.Connection, group: str, partition: int) -> int:
+    row = conn.execute(
+        "SELECT epoch FROM partition_epoch WHERE group_name = ? AND partition = ?", (group, partition)
+    ).fetchone()
+    return row["epoch"] if row else 0
+
+
+def bump_epoch(conn: sqlite3.Connection, group: str, partition: int) -> int:
+    next_epoch = get_epoch(conn, group, partition) + 1
+    conn.execute(
+        """INSERT INTO partition_epoch (group_name, partition, epoch) VALUES (?, ?, ?)
+           ON CONFLICT(group_name, partition) DO UPDATE SET epoch = excluded.epoch""",
+        (group, partition, next_epoch),
+    )
+    return next_epoch

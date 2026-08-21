@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uuid
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import jsonschema
@@ -24,6 +24,7 @@ from ..errors import (
     EventNotFound,
     GroupAlreadyExists,
     GroupNotFound,
+    InvalidArgument,
     LeaseMismatch,
     SchemaConflict,
     SchemaNotFound,
@@ -81,6 +82,8 @@ class EventMeshService:
         self._round_robin: dict[str, int] = defaultdict(int)
 
     def create_topic(self, name: str, partition_count: int) -> Topic:
+        if partition_count < 1:
+            raise InvalidArgument(f"partition_count must be at least 1, got {partition_count}")
         with self.db.atomic() as conn:
             if topics_store.get_topic(conn, name) is not None:
                 raise TopicAlreadyExists(name)
@@ -245,31 +248,33 @@ class EventMeshService:
             group = groups_store.get_group(conn, group_name)
             if group is None:
                 raise GroupNotFound(group_name)
-            topic = topics_store.get_topic(conn, group.topic)
-
-            now = timeutil.now()
-            groups_store.delete_expired_workers(conn, group_name, now)
-            lease_expiry = timeutil.now()
-            groups_store.heartbeat_worker(
-                conn, group_name, worker_id, self._add_seconds(lease_expiry, group.worker_lease_seconds)
-            )
-
-            alive = groups_store.list_alive_workers(conn, group_name, now)
-            assignment = compute_assignment(topic.partition_count, alive)
-            current = {a.partition: a.worker_id for a in groups_store.get_assignments(conn, group_name)}
-            for partition, owner in assignment.items():
-                if current.get(partition) != owner:
-                    groups_store.set_assignment(
-                        conn,
-                        PartitionAssignment(group=group_name, topic=group.topic, partition=partition, worker_id=owner, assigned_at=now),
-                    )
-
+            self._heartbeat_and_rebalance(conn, group, worker_id, timeutil.now())
             return groups_store.get_partitions_for_worker(conn, group_name, worker_id)
+
+    def _heartbeat_and_rebalance(self, conn, group: ConsumerGroup, worker_id: str, now: datetime) -> None:
+        """Registers worker_id as alive, drops any worker whose lease has
+        lapsed, and recomputes partition ownership from whichever workers
+        are alive afterward. Called from both heartbeat_worker() and
+        poll(), since polling is itself evidence of liveness - a worker
+        doesn't need a separate heartbeat call as long as it's polling
+        regularly.
+        """
+        groups_store.delete_expired_workers(conn, group.name, now)
+        groups_store.heartbeat_worker(conn, group.name, worker_id, self._add_seconds(now, group.worker_lease_seconds))
+
+        topic = topics_store.get_topic(conn, group.topic)
+        alive = groups_store.list_alive_workers(conn, group.name, now)
+        assignment = compute_assignment(topic.partition_count, alive)
+        current = {a.partition: a.worker_id for a in groups_store.get_assignments(conn, group.name)}
+        for partition, owner in assignment.items():
+            if current.get(partition) != owner:
+                groups_store.set_assignment(
+                    conn,
+                    PartitionAssignment(group=group.name, topic=group.topic, partition=partition, worker_id=owner, assigned_at=now),
+                )
 
     @staticmethod
     def _add_seconds(t: datetime, seconds: float) -> datetime:
-        from datetime import timedelta
-
         return t + timedelta(seconds=seconds)
 
     def poll(self, group_name: str, worker_id: str, max_events: int = 1) -> list[Delivered]:
@@ -279,19 +284,7 @@ class EventMeshService:
                 raise GroupNotFound(group_name)
 
             now = timeutil.now()
-            groups_store.delete_expired_workers(conn, group_name, now)
-            groups_store.heartbeat_worker(conn, group_name, worker_id, self._add_seconds(now, group.worker_lease_seconds))
-
-            t = topics_store.get_topic(conn, group.topic)
-            alive = groups_store.list_alive_workers(conn, group_name, now)
-            assignment = compute_assignment(t.partition_count, alive)
-            current = {a.partition: a.worker_id for a in groups_store.get_assignments(conn, group_name)}
-            for partition, owner in assignment.items():
-                if current.get(partition) != owner:
-                    groups_store.set_assignment(
-                        conn,
-                        PartitionAssignment(group=group_name, topic=group.topic, partition=partition, worker_id=owner, assigned_at=now),
-                    )
+            self._heartbeat_and_rebalance(conn, group, worker_id, now)
 
             owned = groups_store.get_partitions_for_worker(conn, group_name, worker_id)
             delivered: list[Delivered] = []
@@ -309,7 +302,8 @@ class EventMeshService:
                 if event is None:
                     continue
 
-                attempt = deliveries_store.count_deliveries_for_event(conn, group_name, event.id) + 1
+                epoch = groups_store.get_epoch(conn, group_name, partition)
+                attempt = deliveries_store.count_deliveries_for_event_in_epoch(conn, group_name, event.id, epoch) + 1
                 delivery = Delivery(
                     id=str(uuid.uuid4()),
                     group=group_name,
@@ -319,6 +313,7 @@ class EventMeshService:
                     event_offset=event.offset,
                     worker_id=worker_id,
                     attempt=attempt,
+                    epoch=epoch,
                     status=DeliveryStatus.DELIVERED,
                     lease_expires_at=self._add_seconds(now, group.delivery_lease_seconds),
                     delivered_at=now,
@@ -468,6 +463,9 @@ class EventMeshService:
             return new_event
 
     def replay(self, group_name: str, partition: Optional[int] = None, to_offset: Optional[int] = None, earliest: bool = False) -> None:
+        if to_offset is not None and to_offset < 0:
+            raise InvalidArgument(f"to_offset must be >= 0, got {to_offset}")
+
         with self.db.atomic() as conn:
             group = groups_store.get_group(conn, group_name)
             if group is None:
@@ -479,6 +477,14 @@ class EventMeshService:
                 active = deliveries_store.get_active_delivery_for_partition(conn, group_name, p)
                 if active is not None:
                     deliveries_store.set_status(conn, active.id, DeliveryStatus.EXPIRED)
+
+                # Bumping the epoch, not just the offset, is what keeps
+                # this safe for an event that already burned its retry
+                # budget before being dead-lettered: attempt counting is
+                # scoped to the current epoch, so a replayed event gets a
+                # fresh retry budget instead of going straight back to
+                # the DLQ on its first re-poll.
+                groups_store.bump_epoch(conn, group_name, p)
 
                 new_committed = -1 if earliest else (to_offset - 1 if to_offset is not None else -1)
                 groups_store.set_committed_offset(conn, group_name, group.topic, p, new_committed)

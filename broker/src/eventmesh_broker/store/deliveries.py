@@ -17,6 +17,7 @@ def _row_to_delivery(row: sqlite3.Row) -> Delivery:
         event_offset=row["event_offset"],
         worker_id=row["worker_id"],
         attempt=row["attempt"],
+        epoch=row["epoch"],
         status=DeliveryStatus(row["status"]),
         lease_expires_at=timeutil.parse(row["lease_expires_at"]),
         delivered_at=timeutil.parse(row["delivered_at"]),
@@ -26,8 +27,8 @@ def _row_to_delivery(row: sqlite3.Row) -> Delivery:
 def create_delivery(conn: sqlite3.Connection, delivery: Delivery) -> None:
     conn.execute(
         """INSERT INTO deliveries
-            (id, group_name, topic, partition, event_id, event_offset, worker_id, attempt, status, lease_expires_at, delivered_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (id, group_name, topic, partition, event_id, event_offset, worker_id, attempt, epoch, status, lease_expires_at, delivered_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             delivery.id,
             delivery.group,
@@ -37,6 +38,7 @@ def create_delivery(conn: sqlite3.Connection, delivery: Delivery) -> None:
             delivery.event_offset,
             delivery.worker_id,
             delivery.attempt,
+            delivery.epoch,
             delivery.status.value,
             timeutil.fmt(delivery.lease_expires_at),
             timeutil.fmt(delivery.delivered_at),
@@ -126,9 +128,14 @@ def mark_redriven(conn: sqlite3.Connection, dl_id: str, redriven_as_event_id: st
     )
 
 
-def count_deliveries_for_event(conn: sqlite3.Connection, group: str, event_id: str) -> int:
+def count_deliveries_for_event_in_epoch(conn: sqlite3.Connection, group: str, event_id: str, epoch: int) -> int:
+    # Scoped to the partition's current epoch, not every delivery this
+    # event has ever had: a replay bumps the epoch specifically so an
+    # event that already burned its retry budget before being
+    # dead-lettered gets a fresh one on redelivery, rather than being
+    # sent right back to the DLQ on its first re-poll.
     row = conn.execute(
-        "SELECT COUNT(*) AS n FROM deliveries WHERE group_name = ? AND event_id = ?",
-        (group, event_id),
+        "SELECT COUNT(*) AS n FROM deliveries WHERE group_name = ? AND event_id = ? AND epoch = ?",
+        (group, event_id, epoch),
     ).fetchone()
     return row["n"]

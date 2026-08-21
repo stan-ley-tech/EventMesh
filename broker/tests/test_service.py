@@ -5,6 +5,7 @@ import pytest
 from eventmesh_broker.db import Database
 from eventmesh_broker.core.service import EventMeshService
 from eventmesh_broker.errors import (
+    InvalidArgument,
     LeaseMismatch,
     SchemaConflict,
     SchemaValidationError,
@@ -160,7 +161,39 @@ def test_replay_resets_offset_and_redelivers(service):
 
     replayed = service.poll("processors", "worker-1", max_events=1)[0]
     assert replayed.event.payload["order_id"] == "o1"
-    assert replayed.attempt == 2  # this event has now been delivered twice
+    # attempt resets to 1: replay bumps the partition's epoch, and
+    # attempt counting is scoped to the current epoch specifically so a
+    # replayed event gets a fresh retry budget rather than inheriting
+    # its pre-replay delivery count (which, for an event that had
+    # already been dead-lettered, would send it right back to the DLQ)
+    assert replayed.attempt == 1
+
+
+def test_replaying_a_dead_lettered_event_gets_a_fresh_retry_budget(service):
+    service.create_topic("orders", partition_count=1)
+    service.register_schema("orders", 1, ORDER_SCHEMA_V1)
+    service.create_group(
+        "processors", topic="orders",
+        retry_policy=RetryPolicy(max_attempts=1, backoff_base_ms=1, backoff_multiplier=1, backoff_max_ms=5, jitter_fraction=0),
+    )
+    service.publish("orders", {"order_id": "o1", "amount": 1.0}, schema_version=1)
+
+    d1 = service.poll("processors", "worker-1", max_events=1)[0]
+    service.nack(d1.delivery_id, "worker-1", "boom")
+    assert len(service.list_dead_letters("processors")) == 1
+
+    service.replay("processors", earliest=True)
+
+    redelivered = service.poll("processors", "worker-1", max_events=1)[0]
+    # without the epoch reset, this would already equal max_attempts
+    # (1) and the very next nack would dead-letter it again immediately
+    assert redelivered.attempt == 1
+
+    service.ack(redelivered.delivery_id, "worker-1")
+    # the original dead-letter record stands (replay doesn't erase
+    # history), but acking the redelivery must not have created a
+    # second one
+    assert len(service.list_dead_letters("processors")) == 1
 
 
 def test_schema_evolution_accepts_additive_version_and_rejects_breaking_one(service):
@@ -257,3 +290,18 @@ def test_filter_skips_non_matching_events(service):
     delivered = service.poll("us_only", "worker-1", max_events=1)
     assert len(delivered) == 1
     assert delivered[0].event.payload["order_id"] == "o2"
+
+
+def test_create_topic_rejects_non_positive_partition_count(service):
+    with pytest.raises(InvalidArgument):
+        service.create_topic("orders", partition_count=0)
+    with pytest.raises(InvalidArgument):
+        service.create_topic("orders", partition_count=-1)
+
+
+def test_replay_rejects_negative_to_offset(service):
+    service.create_topic("orders", partition_count=1)
+    service.register_schema("orders", 1, ORDER_SCHEMA_V1)
+    service.create_group("processors", topic="orders")
+    with pytest.raises(InvalidArgument):
+        service.replay("processors", to_offset=-1)

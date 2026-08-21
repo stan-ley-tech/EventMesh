@@ -3,12 +3,12 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class CreateTopicRequest(BaseModel):
     name: str
-    partition_count: int = 3
+    partition_count: int = Field(default=3, ge=1)
 
 
 class RegisterSchemaRequest(BaseModel):
@@ -58,6 +58,6 @@ class NackRequest(BaseModel):
 
 
 class ReplayRequest(BaseModel):
-    partition: Optional[int] = None
-    to_offset: Optional[int] = None
+    partition: Optional[int] = Field(default=None, ge=0)
+    to_offset: Optional[int] = Field(default=None, ge=0)
     earliest: bool = False

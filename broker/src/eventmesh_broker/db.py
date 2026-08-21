@@ -78,6 +78,13 @@ CREATE TABLE IF NOT EXISTS offsets (
     PRIMARY KEY (group_name, partition)
 );
 
+CREATE TABLE IF NOT EXISTS partition_epoch (
+    group_name TEXT NOT NULL,
+    partition INTEGER NOT NULL,
+    epoch INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (group_name, partition)
+);
+
 CREATE TABLE IF NOT EXISTS deliveries (
     id TEXT PRIMARY KEY,
     group_name TEXT NOT NULL,
@@ -87,6 +94,7 @@ CREATE TABLE IF NOT EXISTS deliveries (
     event_offset INTEGER NOT NULL,
     worker_id TEXT NOT NULL,
     attempt INTEGER NOT NULL,
+    epoch INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL,
     lease_expires_at TEXT NOT NULL,
     delivered_at TEXT NOT NULL
@@ -133,7 +141,6 @@ class Database:
     def __init__(self, path: str):
         self._conn = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
         self._conn.row_factory = sqlite3.Row
-        self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.execute("PRAGMA busy_timeout = 5000")
         self._conn.executescript(SCHEMA)
         self._lock = threading.RLock()
@@ -143,17 +150,28 @@ class Database:
 
     @contextmanager
     def atomic(self):
+        # committed as a finally-guarded flag, rather than rolling back
+        # only in an `except Exception` branch, so the transaction is
+        # never left open on the shared connection - not for a plain
+        # exception, not for BaseException (a cancellation, a
+        # KeyboardInterrupt), and not if COMMIT itself fails.
         with self._lock:
             self._conn.execute("BEGIN IMMEDIATE")
+            committed = False
             try:
                 yield self._conn
-            except Exception:
-                self._conn.execute("ROLLBACK")
-                raise
-            else:
                 self._conn.execute("COMMIT")
+                committed = True
+            finally:
+                if not committed:
+                    self._conn.execute("ROLLBACK")
 
     @contextmanager
     def read(self):
+        # No BEGIN here - this is safe only because every atomic()
+        # writer holds the same lock for its entire transaction, so a
+        # read can never observe a partially-written state. That
+        # guarantee breaks if anything ever opens a second connection
+        # to this database file or bypasses this lock.
         with self._lock:
             yield self._conn

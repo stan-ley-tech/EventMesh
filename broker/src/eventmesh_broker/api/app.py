@@ -40,6 +40,8 @@ def _status_for(exc: errors.EventMeshError) -> int:
         return 409
     if isinstance(exc, errors.SchemaValidationError):
         return 422
+    if isinstance(exc, errors.InvalidArgument):
+        return 400
     return 500
 
 

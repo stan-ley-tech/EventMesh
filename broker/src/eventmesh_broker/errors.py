@@ -2,6 +2,10 @@ class EventMeshError(Exception):
     pass
 
 
+class InvalidArgument(EventMeshError):
+    pass
+
+
 class TopicNotFound(EventMeshError):
     pass
 

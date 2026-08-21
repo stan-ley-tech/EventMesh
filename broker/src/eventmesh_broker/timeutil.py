@@ -8,6 +8,13 @@ def now() -> datetime:
 
 
 def fmt(t: datetime) -> str:
+    # A naive datetime (no tzinfo) is treated as already being UTC, not
+    # converted from the host's local timezone - astimezone() would
+    # otherwise silently assume local time for naive input, which is
+    # almost never what a caller means and shifts deliver_after by
+    # whatever the server's UTC offset happens to be.
+    if t.tzinfo is None:
+        t = t.replace(tzinfo=timezone.utc)
     return t.astimezone(timezone.utc).isoformat()
 
 
